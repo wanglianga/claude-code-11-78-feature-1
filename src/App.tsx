@@ -6,6 +6,7 @@ import LoaderPage from './ui/pages/LoaderPage';
 import AlignmentPage from './ui/pages/AlignmentPage';
 import RulesPage from './ui/pages/RulesPage';
 import VerificationPage from './ui/pages/VerificationPage';
+import LocationPage from './ui/pages/LocationPage';
 import EventsPage from './ui/pages/EventsPage';
 import EventDetailPage from './ui/pages/EventDetailPage';
 import EvidencePage from './ui/pages/EvidencePage';
@@ -30,6 +31,7 @@ export default function App() {
         <Route path="/alignment" element={<AlignmentPage />} />
         <Route path="/rules" element={<RulesPage />} />
         <Route path="/verification" element={<VerificationPage />} />
+        <Route path="/location" element={<LocationPage />} />
         <Route path="/events" element={<EventsPage />} />
         <Route path="/events/:route/:id" element={<EventDetailPage />} />
         <Route path="/evidence" element={<EvidencePage />} />

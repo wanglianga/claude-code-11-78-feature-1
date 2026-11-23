@@ -15,6 +15,7 @@ const NAV_GROUPS: Array<{ title: string; items: Array<{ to: string; label: strin
     title: '核验与压缩',
     items: [
       { to: '/verification', label: '时序核验器' },
+      { to: '/location', label: '定位可信度与漂移复核' },
       { to: '/events', label: '压缩事件双路线' },
       { to: '/evidence', label: '证据图' },
     ],

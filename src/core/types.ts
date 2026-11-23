@@ -7,11 +7,14 @@ export type RecordKind =
   | 'valve_reading' // 阀井读数
   | 'ledger' // 设备台账
   | 'construction' // 施工清单
-  | 'rectification'; // 整改回执
+  | 'rectification' // 整改回执
+  | 'photo' // 现场照片（带拍摄定位）
+  | 'scan' // 点位扫码记录
+  | 'repair'; // 设备报修单
 
 export type Confidence = 'high' | 'medium' | 'low';
 export type Severity = 'info' | 'minor' | 'major' | 'critical';
-export type RuleKind = 'missing' | 'jump' | 'contradiction' | 'overdue';
+export type RuleKind = 'missing' | 'jump' | 'contradiction' | 'overdue' | 'geo_breach';
 export type AlertStatus = 'open' | 'actioned' | 'closed';
 export type CompressionRoute = 'A' | 'B';
 export type SyncState = 'local' | 'synced' | 'conflict';
@@ -29,6 +32,149 @@ export interface RawRecord {
   signature: string; // 内容哈希签名（装载时计算并固化）
   batchId: string;
   backfilled: boolean; // 离线补传
+}
+
+// ============================================================
+// 定位可信度子系统：
+// 巡检片区 -> 多源定位证据（GPS 轨迹/照片/扫码/报修）-> 逐点可信度
+// -> 漂移段切分 -> 区间位置校正（保留依据与不可校正范围）
+// -> 独立疑点/行程异常/报修联动 -> 定位单独触发告警的降权与复核队列。
+// 原始 GPS 坐标全程保留，任何调整都不回写原始记录。
+// ============================================================
+
+/** 巡检片区（人员应在的指定片区，含设备与地理围栏） */
+export interface PatrolSector {
+  id: string;
+  name: string;
+  bbox: { lngMin: number; lngMax: number; latMin: number; latMax: number };
+  anchorLocation: { lng: number; lat: number }; // 片区锚点（签到点/中心）
+  deviceIds: string[]; // 片区内设备
+}
+
+export type LocationEvidenceKind = 'gps' | 'photo' | 'scan' | 'repair';
+
+/** 多源定位证据：统一封装轨迹点、照片定位、扫码点位与报修点位 */
+export interface LocationEvidence {
+  id: string;
+  rawId: string; // 对应 RawRecord.id
+  signature: string; // 对应 RawRecord.signature，证据链可回溯
+  kind: LocationEvidenceKind;
+  inspector: string;
+  at: string; // 业务时间（采样/拍摄/扫码/报修时间）
+  location: { lng: number; lat: number }; // WGS84
+  sectorId: string | null; // 坐标所在片区（地理围栏判定）
+  sourceSectorId: string | null; // 业务来源片区：扫码/报修绑定的片区（可能与坐标片区冲突）
+  deviceId: string | null;
+  ref: string; // 照片号 / 扫码点编号 / 报修单号等展示引用
+  accuracyM?: number; // GPS 标称精度（米），越小越可信
+}
+
+/** 单个可信度评分因子（解释性，可在页面逐项列出） */
+export interface TrustFactor {
+  code:
+    | 'accuracy' // GPS 标称精度
+    | 'speed' // 与上一点的连续速度是否越过可达上限
+    | 'jump' // 坐标瞬时跳变距离
+    | 'fence' // 是否落在指定片区围栏内
+    | 'photo_confirm' // 同时段照片定位一致
+    | 'scan_confirm' // 同时段扫码片区一致
+    | 'repair_confirm' // 同时段报修点位一致
+    | 'trajectory_density'; // 邻近轨迹点密度（孤点降可信）
+  delta: number; // 分值增减（可为负）
+  note: string;
+}
+
+export type TrustLevel = 'trusted' | 'suspect' | 'drift';
+
+/** 逐定位点可信度评估结果（原始坐标保留在 LocationEvidence.location） */
+export interface LocationTrust {
+  evidenceId: string;
+  score: number; // 0-100
+  level: TrustLevel;
+  factors: TrustFactor[];
+  matchedEvidenceIds: string[]; // 交叉匹配命中的照片/扫码/报修证据
+  contradictEvidenceIds: string[]; // 与 GPS 位置矛盾的证据（如照片在漂移段外）
+  speedKmh: number | null; // 相对上一 GPS 点的连续速度
+  jumpM: number | null; // 相对上一 GPS 点的跳变距离（米）
+}
+
+export type CorrectionStatus =
+  | 'none' // 未校正（可信点或不满足明确校验条件）
+  | 'corrected' // 已按明确校验条件校正为区间位置
+  | 'uncorrectable'; // 漂移且存在矛盾证据，禁止校正，必须人工复核
+
+/** 漂移段：连续低可信 GPS 点切分，含区间位置校正结论与依据 */
+export interface DriftSegment {
+  id: string;
+  evidenceIds: string[]; // 段内 GPS 证据（按时间）
+  startAt: string;
+  endAt: string;
+  entryLocation: { lng: number; lat: number }; // 漂移前最后一个可信点
+  exitLocation: { lng: number; lat: number }; // 漂移后第一个可信点
+  entrySectorId: string | null;
+  exitSectorId: string | null;
+  maxJumpM: number;
+  maxSpeedKmh: number;
+  status: CorrectionStatus;
+  /** 校正为区间位置时的落点（entry/exit 同片区时为该片区锚点） */
+  correctedLocation: { lng: number; lat: number } | null;
+  correctedSectorId: string | null;
+  /** 校正依据：满足的明确校验条件（逐条可审计） */
+  correctionBasis: string[];
+  /** 不能校正的范围/原因（status=uncorrectable 时必填） */
+  uncorrectableReason: string | null;
+  supportingEvidenceIds: string[]; // 支持校正/判定的照片/扫码/报修证据
+  contradictEvidenceIds: string[]; // 阻碍校正的矛盾证据
+}
+
+export type LocationAnomalyKind =
+  | 'independent_doubt' // 独立疑点：照片落在漂移段外
+  | 'trip_anomaly' // 行程异常：连续速度越过可达上限
+  | 'repair_link'; // 设备报修联动：扫码属另一片区且与报修单相互印证
+
+export type AnomalyVerdict = 'open' | 'confirmed' | 'dismissed';
+
+/** 定位异常：独立疑点 / 行程异常 / 报修联动 */
+export interface LocationAnomaly {
+  id: string;
+  kind: LocationAnomalyKind;
+  title: string;
+  at: string;
+  sectorId: string | null;
+  deviceId: string | null;
+  evidenceIds: string[]; // 关联证据（含签名回溯）
+  driftSegmentId: string | null;
+  detail: string;
+  verdict: AnomalyVerdict;
+  severityScore: number;
+}
+
+/** 告警的定位调整（仅作用于“由定位单独触发”的 geo_breach 告警） */
+export interface AlertGeoAdjustment {
+  originalSeverity: Severity; // 调整前严重度（原始判定保留）
+  adjustedSeverity: Severity; // 降权后严重度
+  trustLevel: TrustLevel;
+  driftSegmentId: string | null;
+  correctedLocation: { lng: number; lat: number } | null;
+  basis: string[]; // 降权/调整依据（多源证据条目）
+  downweighted: boolean; // 是否实际降权
+  reviewItemId: string;
+}
+
+/** 复核队列条目：定位降权、漂移段、异常统一进入人工复核 */
+export interface ReviewItem {
+  id: string;
+  createdAt: string;
+  category: 'geo_alert' | 'drift_segment' | 'anomaly';
+  refId: string; // Alert.id / DriftSegment.id / LocationAnomaly.id
+  title: string;
+  reason: string;
+  severity: Severity;
+  status: 'queued' | 'in_review' | 'resolved' | 'rejected';
+  resolution: string | null;
+  resolvedBy: string | null;
+  resolvedAt: string | null;
+  evidenceRefs: string[]; // 签名列表
 }
 
 // ---------------- 台账 / 施工 / 回执 ----------------
@@ -109,6 +255,9 @@ export interface RuleDef {
     jumpRangeRatio?: number; // 跳变幅度占量程比例
     contradictionTol?: number; // 状态/读数矛盾容忍
     overdueMin?: number; // 逾期宽限分钟
+    geoJumpM?: number; // 定位瞬时跳变距离阈值（米）
+    geoSpeedLimitKmh?: number; // 连续行程可达速度上限（km/h）
+    geoTrustFloor?: number; // 定位可信度降权门限（低于该分数的定位单独告警降权）
   };
   baseSeverity: Severity;
   constructionGrace: boolean;
@@ -151,6 +300,8 @@ export interface Alert {
     networkDrift: boolean;
     backfilled: boolean;
   };
+  /** 定位单独触发告警的多源证据调整（降权/校正引用），不改变原始坐标与原严重度留痕 */
+  geoAdjustment?: AlertGeoAdjustment;
 }
 
 // ---------------- 压缩事件 ----------------
@@ -213,7 +364,10 @@ export type EvidenceNodeType =
   | 'construction'
   | 'rectification'
   | 'alert'
-  | 'event';
+  | 'event'
+  | 'location' // 多源定位证据（GPS/照片/扫码/报修）
+  | 'drift' // 漂移段
+  | 'review'; // 复核队列条目
 
 export interface EvidenceNode {
   id: string;
@@ -228,7 +382,10 @@ export type EvidenceRelation =
   | 'in_zone'
   | 'responded_by'
   | 'member_of'
-  | 'contradicts';
+  | 'contradicts'
+  | 'located_in' // 定位证据 -> 片区/设备
+  | 'corrected_to' // 漂移段 -> 校正落点（锚点证据）
+  | 'queued_as'; // 告警/漂移段/异常 -> 复核条目
 
 export interface EvidenceEdge {
   id: string;

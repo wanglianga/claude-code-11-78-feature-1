@@ -47,7 +47,7 @@ export default function VerificationPage() {
         )}
         {alerts.length > 0 && (
           <div className="kpi-grid" style={{ marginTop: 14 }}>
-            {(['missing', 'jump', 'contradiction', 'overdue'] as RuleKind[]).map((k) => (
+            {(['missing', 'jump', 'contradiction', 'overdue', 'geo_breach'] as RuleKind[]).map((k) => (
               <div className="kpi" key={k}>
                 <div className="num">{counts.byKind[k] ?? 0}</div>
                 <div className="label">{KIND_LABEL[k]}告警</div>
@@ -59,6 +59,14 @@ export default function VerificationPage() {
                 <div className="label">{s}</div>
               </div>
             ))}
+          </div>
+        )}
+        {alerts.some((a) => a.geoAdjustment) && (
+          <div className="banner warn" style={{ marginTop: 12 }}>
+            定位越界告警按多源证据调整：其中{' '}
+            <strong>{alerts.filter((a) => a.geoAdjustment?.downweighted).length}</strong> 条由定位单独触发、
+            经照片/扫码交叉印证后降权（原严重度保留在告警调整记录）；不可校正范围维持原级并进入
+            <strong>定位可信度与漂移复核</strong>队列。
           </div>
         )}
         {report && (
@@ -106,7 +114,19 @@ export default function VerificationPage() {
                   <td className="mono small">{short(a.id, 12)}</td>
                   <td>{KIND_LABEL[a.kind]}</td>
                   <td className="mono">{a.deviceId}</td>
-                  <td><SeverityBadge value={a.severity} /></td>
+                  <td>
+                    <SeverityBadge value={a.severity} />
+                    {a.geoAdjustment && (
+                      <div className="small" style={{ marginTop: 3 }}>
+                        <span className="muted">原 {a.geoAdjustment.originalSeverity}</span>
+                        {a.geoAdjustment.downweighted ? (
+                          <span className="diff-add"> → 降权 {a.geoAdjustment.adjustedSeverity}</span>
+                        ) : (
+                          <span className="diff-del"> → 维持（不可校正）</span>
+                        )}
+                      </div>
+                    )}
+                  </td>
                   <td>{hm(a.observedAt)}</td>
                   <td className="small mono">
                     {a.ruleVersionId}

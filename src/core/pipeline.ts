@@ -14,6 +14,7 @@ import {
   verifyBoundary,
 } from './compression';
 import { verify } from './engine';
+import { analyzeLocation, type GeoAnalysis } from './geo';
 import { buildEvidenceGraph, type EvidenceGraph } from './evidence';
 import { buildSyncReport } from './sync';
 import type {
@@ -23,9 +24,15 @@ import type {
   ConstructionZone,
   DeviceLedger,
   DisposalAction,
+  LocationAnomaly,
+  LocationEvidence,
+  LocationTrust,
+  DriftSegment,
   MembershipRecord,
+  PatrolSector,
   RawRecord,
   Rectification,
+  ReviewItem,
   RuleVersion,
   SemanticMapping,
   SyncReport,
@@ -36,6 +43,7 @@ export interface PipelineInput {
   raw: RawRecord[];
   ledger: DeviceLedger[];
   zones: ConstructionZone[];
+  sectors: PatrolSector[];
   rectifications: Rectification[];
   mapping: SemanticMapping;
   ruleVersions: RuleVersion[];
@@ -55,6 +63,12 @@ export interface PipelineOutput {
   graph: EvidenceGraph;
   report: SyncReport;
   seededActions: DisposalAction[];
+  // 定位可信度子系统产物
+  locationEvidence: LocationEvidence[];
+  locationTrusts: LocationTrust[];
+  driftSegments: DriftSegment[];
+  locationAnomalies: LocationAnomaly[];
+  reviewItems: ReviewItem[];
 }
 
 const PHASE2_START = t(12, 0);
@@ -92,7 +106,21 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     mappingVersion: input.mapping.version,
     nowIso: input.nowIso,
   });
-  const alerts = [...alertsV1, ...alertsV2];
+
+  // 定位可信度分析：多源证据 -> 可信度 -> 漂移切分/校正 -> 异常 -> 越界告警降权 -> 复核队列。
+  // 定位样例全部位于 12:00 换版之后，统一按 RV-2026.2 的 R-GEO 规则核验。
+  const geoRule = v2.rules.find((r) => r.kind === 'geo_breach' && r.enabled)!;
+  const geo: GeoAnalysis = await analyzeLocation({
+    raw: input.raw,
+    sectors: input.sectors,
+    rule: geoRule,
+    ruleVersionId: v2.id,
+    mappingVersion: input.mapping.version,
+    ledgerVersion: input.ledger[0]?.ledgerVersion ?? 'ledger-v3',
+    nowIso: input.nowIso,
+  });
+
+  const alerts = [...alertsV1, ...alertsV2, ...geo.alerts];
 
   // 双路线压缩（共用同一分组，保证切窗一致）
   const groups = buildGroups(alerts);
@@ -183,6 +211,11 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     alerts,
     events: [...allEventsA, ...eventsB],
     membershipAlertIds,
+    sectors: input.sectors,
+    locationEvidence: geo.evidence,
+    driftSegments: geo.segments,
+    locationAnomalies: geo.anomalies,
+    reviewItems: geo.reviewItems,
   });
 
   const alertsById = new Map(alerts.map((x) => [x.id, x]));
@@ -211,5 +244,10 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineOutput>
     graph,
     report,
     seededActions,
+    locationEvidence: geo.evidence,
+    locationTrusts: geo.trusts,
+    driftSegments: geo.segments,
+    locationAnomalies: geo.anomalies,
+    reviewItems: geo.reviewItems,
   };
 }

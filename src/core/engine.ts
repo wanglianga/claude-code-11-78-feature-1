@@ -286,6 +286,7 @@ const KIND_LABEL: Record<RuleKind, string> = {
   jump: '跳变',
   contradiction: '状态矛盾',
   overdue: '处置逾期',
+  geo_breach: '定位越界',
 };
 
 /** 核验主入口：产出内容寻址的不可变告警 */

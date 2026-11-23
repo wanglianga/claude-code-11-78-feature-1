@@ -9,6 +9,7 @@
 import type {
   ConstructionZone,
   DeviceLedger,
+  PatrolSector,
   RawRecord,
   Rectification,
   RuleVersion,
@@ -177,6 +178,40 @@ export function buildZones(): ConstructionZone[] {
   ];
 }
 
+// ---------------- 巡检片区（定位围栏与人员应在范围） ----------------
+export function buildSectors(): PatrolSector[] {
+  return [
+    {
+      id: 'PS-A',
+      name: '朝阳路一线巡检片区',
+      bbox: { lngMin: 116.397, lngMax: 116.404, latMin: 39.897, latMax: 39.904 },
+      anchorLocation: { lng: 116.4002, lat: 39.9002 },
+      deviceIds: ['VW-001'],
+    },
+    {
+      id: 'PS-B',
+      name: '河东加压片区',
+      bbox: { lngMin: 116.409, lngMax: 116.415, latMin: 39.902, latMax: 39.908 },
+      anchorLocation: { lng: 116.412, lat: 39.905 },
+      deviceIds: ['PS-002'],
+    },
+    {
+      id: 'PS-C',
+      name: '北环流量片区',
+      bbox: { lngMin: 116.387, lngMax: 116.393, latMin: 39.907, latMax: 39.913 },
+      anchorLocation: { lng: 116.39, lat: 39.91 },
+      deviceIds: ['FS-003'],
+    },
+    {
+      id: 'PS-D',
+      name: '东郊对照片区',
+      bbox: { lngMin: 116.447, lngMax: 116.453, latMin: 39.917, latMax: 39.923 },
+      anchorLocation: { lng: 116.45, lat: 39.92 },
+      deviceIds: ['VW-004'],
+    },
+  ];
+}
+
 export function buildRectifications(): Rectification[] {
   return [
     {
@@ -257,6 +292,15 @@ export function buildRuleVersions(): RuleVersion[] {
           baseSeverity: 'minor',
           constructionGrace: false,
         },
+        {
+          id: 'R-GEO',
+          kind: 'geo_breach',
+          name: '定位越界（可信度门限）',
+          enabled: true,
+          params: { geoJumpM: 500, geoSpeedLimitKmh: 60, geoTrustFloor: 45 },
+          baseSeverity: 'major',
+          constructionGrace: false,
+        },
       ],
     },
     {
@@ -264,7 +308,7 @@ export function buildRuleVersions(): RuleVersion[] {
       publishedAt: t(12, 0),
       active: false,
       changelog:
-        '收紧阈值：缺测 30→20 分钟、跳变比 0.40→0.25 且升为 critical、矛盾容忍 10→5 并升为 critical、逾期宽限 60→30 分钟',
+        '收紧阈值：缺测 30→20 分钟、跳变比 0.40→0.25 且升为 critical、矛盾容忍 10→5 并升为 critical、逾期宽限 60→30 分钟；定位越界升 critical 并启用多源证据降权门限',
       rules: [
         {
           id: 'R-MISSING',
@@ -300,6 +344,15 @@ export function buildRuleVersions(): RuleVersion[] {
           enabled: true,
           params: { overdueMin: 30 },
           baseSeverity: 'major',
+          constructionGrace: false,
+        },
+        {
+          id: 'R-GEO',
+          kind: 'geo_breach',
+          name: '定位越界（可信度门限）',
+          enabled: true,
+          params: { geoJumpM: 500, geoSpeedLimitKmh: 60, geoTrustFloor: 45 },
+          baseSeverity: 'critical',
           constructionGrace: false,
         },
       ],
@@ -388,9 +441,9 @@ function vw004Series(): ReadingSpec[] {
 export function buildManifest(): ScenarioManifest {
   return {
     id: 'SCENARIO-2026-11-23',
-    name: '网络漂移 × 施工扰动 × 规则换版 × 离线补传',
+    name: '网络漂移 × 施工扰动 × 规则换版 × 离线补传 × 定位漂移复核',
     description:
-      '同日三阶段：上午施工与网络漂移重叠，中午规则换版收紧阈值，下午巡检端离线后补传并产生同步冲突。',
+      '同日三阶段：上午施工与网络漂移重叠，中午规则换版收紧阈值，下午巡检端离线后补传并产生同步冲突；14:00-16:05 叠加 GPS 数公里漂移，由照片/扫码/报修多源证据完成可信度评估、漂移切分、区间校正与复核队列。',
     ledgerVersion: 'ledger-v3',
     mappingVersion: 'map-v2',
     initialRuleVersionId: 'RV-2026.1',
@@ -420,6 +473,14 @@ export function buildManifest(): ScenarioManifest {
         activeRuleVersionId: 'RV-2026.2',
         note: '巡检端离线处置、17:30 批量补传，对照器展示本地/远端冲突',
       },
+      {
+        id: 'PH-4',
+        name: '阶段四：定位漂移可信度与复核（14:00-16:05 与阶段三交叠）',
+        startAt: t(14, 0),
+        endAt: t(16, 5),
+        activeRuleVersionId: 'RV-2026.2',
+        note: 'GPS 跳到数公里外且连续超速；段一由片区内照片/扫码佐证可区间校正，段二跨片区扫码+报修联动不可校正，越界告警按可信度降权并进复核队列',
+      },
     ],
   };
 }
@@ -428,10 +489,135 @@ export interface ScenarioBundle {
   raw: RawRecord[];
   ledger: DeviceLedger[];
   zones: ConstructionZone[];
+  sectors: PatrolSector[];
   rectifications: Rectification[];
   ruleVersions: RuleVersion[];
   mapping: SemanticMapping;
   manifest: ScenarioManifest;
+}
+
+// ---------------- 定位漂移多源证据样例（14:00-16:05） ----------------
+// 段一 14:15-15:00：GPS 跳到数公里外且连续超速，同片区照片/扫码佐证人员未离开 -> 可校正
+// 段二 15:35-16:05：漂移中出现另一片区扫码+报修单相互印证 -> 不可校正范围
+interface GeoPoint {
+  h: number;
+  m: number;
+  lng: number;
+  lat: number;
+  accuracyM?: number;
+  deviceId?: string | null;
+}
+
+function geoRecord(
+  kind: RawRecord['kind'],
+  sourceId: string,
+  h: number,
+  m: number,
+  payload: Record<string, unknown>,
+  confidence: RawRecord['confidence'],
+): RawRecord {
+  return {
+    id: rid('RAW'),
+    sourceId,
+    kind,
+    payload,
+    sampledAt: t(h, m),
+    arrivedAt: plusMin(t(h, m), 1),
+    confidence,
+    signature: '',
+    batchId: 'BATCH-GEO',
+    backfilled: false,
+  };
+}
+
+/** 定位可信度样例：漂移轨迹、片区内照片、跨片区扫码、设备报修联动 */
+export function buildGeoRaw(sectors: PatrolSector[]): RawRecord[] {
+  const anchorA = sectors.find((s) => s.id === 'PS-A')!.anchorLocation;
+  const anchorC = sectors.find((s) => s.id === 'PS-C')!.anchorLocation;
+  const out: RawRecord[] = [];
+  const inspector = '张巡检';
+
+  // 漂移轨迹：14:00-16:05，两个漂移段；far 点均在数公里外、全部片区围栏之外
+  const traj: GeoPoint[] = [
+    { h: 14, m: 0, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 10, deviceId: 'VW-001' },
+    { h: 14, m: 10, lng: +(anchorA.lng + 0.0004).toFixed(6), lat: +(anchorA.lat - 0.0003).toFixed(6), accuracyM: 12, deviceId: 'VW-001' },
+    { h: 14, m: 15, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 10, deviceId: 'VW-001' }, // 段一入口锚点
+    { h: 14, m: 20, lng: 116.485, lat: 39.945, accuracyM: 800, deviceId: 'VW-001' }, // 跳到 ~8.8km 外，5 分钟 => ~106 km/h
+    { h: 14, m: 30, lng: 116.33, lat: 39.86, accuracyM: 900, deviceId: 'VW-001' }, // 10 分钟移动 ~16km => ~97 km/h
+    { h: 14, m: 40, lng: 116.49, lat: 39.95, accuracyM: 700, deviceId: 'VW-001' },
+    { h: 14, m: 50, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 12, deviceId: 'VW-001' }, // 跳回（大跳变，仍判漂移）
+    { h: 15, m: 0, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 10, deviceId: 'VW-001' }, // 段一出口锚点（可信）
+    { h: 15, m: 10, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 11, deviceId: 'VW-001' },
+    { h: 15, m: 30, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 10, deviceId: 'VW-001' }, // 段二入口锚点
+    { h: 15, m: 35, lng: 116.48, lat: 39.94, accuracyM: 850, deviceId: 'VW-001' },
+    { h: 15, m: 45, lng: 116.34, lat: 39.87, accuracyM: 800, deviceId: 'VW-001' }, // 15:40 跨片区扫码、15:42 报修
+    { h: 15, m: 55, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 12, deviceId: 'VW-001' },
+    { h: 16, m: 5, lng: anchorA.lng, lat: anchorA.lat, accuracyM: 10, deviceId: 'VW-001' }, // 段二出口锚点（可信）
+  ];
+  for (const p of traj) {
+    out.push(
+      geoRecord('trajectory', `TRAJ/GEO/${p.h}${String(p.m).padStart(2, '0')}`, p.h, p.m, {
+        deviceId: p.deviceId ?? null,
+        lng: p.lng,
+        lat: p.lat,
+        coordSystem: 'WGS84',
+        inspector,
+        accuracyM: p.accuracyM,
+      }, p.accuracyM && p.accuracyM >= 200 ? 'low' : 'high'),
+    );
+  }
+
+  // 现场照片：漂移段一时间窗内，照片定位始终在 PS-A 片区（独立疑点 + 校正佐证 C2）
+  const photos: Array<[number, number, string]> = [
+    [14, 25, 'IMG-9001'],
+    [14, 45, 'IMG-9002'],
+  ];
+  for (const [h, m, photoId] of photos) {
+    out.push(
+      geoRecord('photo', `PHOTO/${photoId}`, h, m, {
+        photoId,
+        deviceId: 'VW-001',
+        lng: anchorA.lng,
+        lat: anchorA.lat,
+        inspector,
+      }, 'high'),
+    );
+  }
+
+  // 扫码：段一同片区扫码（校正佐证 C2）+ 段二内跨片区扫码（与报修联动，禁止校正）
+  out.push(
+    geoRecord('scan', 'SCAN/SC-A-07', 14, 35, {
+      scanPointId: 'SC-A-07',
+      deviceId: 'VW-001',
+      sectorId: 'PS-A',
+      lng: anchorA.lng,
+      lat: anchorA.lat,
+      inspector,
+    }, 'high'),
+    geoRecord('scan', 'SCAN/SC-C-11', 15, 40, {
+      scanPointId: 'SC-C-11',
+      deviceId: 'FS-003',
+      sectorId: 'PS-C',
+      lng: anchorC.lng,
+      lat: anchorC.lat,
+      inspector,
+    }, 'high'),
+  );
+
+  // 设备报修单：与段二跨片区扫码同时段、同设备/同片区相互印证（报修联动，不可自动校正）
+  out.push(
+    geoRecord('repair', 'REPAIR/RP-2026-11-23-09', 15, 42, {
+      repairId: 'RP-2026-11-23-09',
+      deviceId: 'FS-003',
+      sectorId: 'PS-C',
+      lng: anchorC.lng,
+      lat: anchorC.lat,
+      inspector,
+      fault: '流量传感器零漂，现场报修',
+    }, 'high'),
+  );
+
+  return out;
 }
 
 export function buildScenario(): ScenarioBundle {
@@ -453,7 +639,6 @@ export function buildScenario(): ScenarioBundle {
   push('P-SENSOR-2', ps002Series(), 'BATCH-MORNING');
   push('F-SENSOR-3', fs003Series(), 'BATCH-DAY');
   push('JING-04', vw004Series(), 'BATCH-DAY');
-
   // 巡检轨迹：施工区附近签到与离线巡检点
   const traj: Array<[number, number, string, number]> = [
     [8, 5, 'VW-001', 1],
@@ -477,10 +662,15 @@ export function buildScenario(): ScenarioBundle {
     });
   }
 
+  // 定位可信度样例：漂移轨迹 + 照片 + 扫码 + 报修（确定性坐标，覆盖校正/不可校正两段）
+  const sectors = buildSectors();
+  raw.push(...buildGeoRaw(sectors));
+
   return {
     raw,
     ledger,
     zones: buildZones(),
+    sectors,
     rectifications: buildRectifications(),
     ruleVersions: buildRuleVersions(),
     mapping,

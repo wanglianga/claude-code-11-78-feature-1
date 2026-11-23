@@ -21,6 +21,9 @@ export default function LoaderPage() {
     ledger: '设备台账',
     construction: '施工清单',
     rectification: '整改回执',
+    photo: '现场照片',
+    scan: '点位扫码',
+    repair: '设备报修',
   };
 
   return (

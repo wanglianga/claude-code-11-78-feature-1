@@ -8,10 +8,15 @@ import type {
   CompressionEvent,
   ConstructionZone,
   DeviceLedger,
+  DriftSegment,
   EvidenceEdge,
   EvidenceNode,
+  LocationAnomaly,
+  LocationEvidence,
+  PatrolSector,
   RawRecord,
   Rectification,
+  ReviewItem,
 } from './types';
 
 export interface EvidenceGraph {
@@ -19,14 +24,26 @@ export interface EvidenceGraph {
   edges: EvidenceEdge[];
 }
 
+const EVIDENCE_LABEL: Record<LocationEvidence['kind'], string> = {
+  gps: 'GPS',
+  photo: '照片',
+  scan: '扫码',
+  repair: '报修',
+};
+
 export function buildEvidenceGraph(input: {
   raw: RawRecord[];
   ledger: DeviceLedger[];
   zones: ConstructionZone[];
+  sectors?: PatrolSector[];
   rectifications: Rectification[];
   alerts: Alert[];
   events: CompressionEvent[];
   membershipAlertIds: Set<string>; // 实际属于事件的告警（两路线并集）
+  locationEvidence?: LocationEvidence[];
+  driftSegments?: DriftSegment[];
+  locationAnomalies?: LocationAnomaly[];
+  reviewItems?: ReviewItem[];
 }): EvidenceGraph {
   const nodes: EvidenceNode[] = [];
   const edges: EvidenceEdge[] = [];
@@ -118,6 +135,68 @@ export function buildEvidenceGraph(input: {
       addEdge(`event:${ev.id}`, `alert:${alertId}`, 'member_of');
     }
     if (ev.parentEventId) addEdge(`event:${ev.id}`, `event:${ev.parentEventId}`, 'derived_from');
+  }
+
+  // ---------------- 定位可信度子系统：证据 / 漂移段 / 复核队列 ----------------
+  const locEvidence = input.locationEvidence ?? [];
+  const locById = new Map(locEvidence.map((e) => [e.id, e]));
+  for (const le of locEvidence) {
+    addNode({
+      id: `loc:${le.id}`,
+      type: 'location',
+      label: `${EVIDENCE_LABEL[le.kind]} ${le.ref}`,
+      sub: `${le.at.slice(11, 16)} · 片区 ${le.sectorId ?? '围栏外'}`,
+    });
+    if (le.deviceId) addEdge(`loc:${le.id}`, `ledger:${le.deviceId}`, 'about_device');
+    if (le.sectorId) addEdge(`loc:${le.id}`, `sector:${le.sectorId}`, 'located_in');
+  }
+  for (const sector of input.sectors ?? []) {
+    addNode({
+      id: `sector:${sector.id}`,
+      type: 'construction',
+      label: sector.id,
+      sub: sector.name,
+    });
+  }
+
+  for (const seg of input.driftSegments ?? []) {
+    addNode({
+      id: `drift:${seg.id}`,
+      type: 'drift',
+      label: seg.id,
+      sub: `${seg.startAt.slice(11, 16)}–${seg.endAt.slice(11, 16)} · ${
+        seg.status === 'corrected' ? `已校正→${seg.correctedSectorId}` : '不可校正'
+      }`,
+    });
+    for (const evId of seg.evidenceIds) {
+      addEdge(`drift:${seg.id}`, `loc:${evId}`, 'derived_from');
+    }
+    for (const evId of seg.supportingEvidenceIds) {
+      addEdge(`drift:${seg.id}`, `loc:${evId}`, 'located_in');
+    }
+    for (const evId of seg.contradictEvidenceIds) {
+      addEdge(`drift:${seg.id}`, `loc:${evId}`, 'contradicts');
+    }
+    if (seg.correctedSectorId) {
+      addEdge(`drift:${seg.id}`, `sector:${seg.correctedSectorId}`, 'corrected_to');
+    }
+  }
+
+  for (const review of input.reviewItems ?? []) {
+    addNode({
+      id: `review:${review.id}`,
+      type: 'review',
+      label: review.id,
+      sub: `${review.category} · ${review.status}`,
+    });
+    if (review.category === 'geo_alert') addEdge(`review:${review.id}`, `alert:${review.refId}`, 'queued_as');
+    if (review.category === 'drift_segment') addEdge(`review:${review.id}`, `drift:${review.refId}`, 'queued_as');
+    if (review.category === 'anomaly') {
+      const anm = input.locationAnomalies?.find((x) => x.id === review.refId);
+      for (const evId of anm?.evidenceIds ?? []) {
+        if (locById.has(evId)) addEdge(`review:${review.id}`, `loc:${evId}`, 'derived_from');
+      }
+    }
   }
 
   return { nodes, edges };

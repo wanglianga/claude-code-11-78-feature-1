@@ -19,22 +19,31 @@ const TYPE_COLOR: Record<EvidenceNode['type'], string> = {
   rectification: '#1a7f4b',
   alert: '#b42318',
   event: '#5b3db8',
+  location: '#0e7c86',
+  drift: '#c2410c',
+  review: '#7a271a',
 };
 const TYPE_LABEL: Record<EvidenceNode['type'], string> = {
   observation: '观测',
   ledger: '台账',
-  construction: '施工',
+  construction: '片区/施工',
   rectification: '回执',
   alert: '告警',
   event: '事件',
+  location: '定位证据',
+  drift: '漂移段',
+  review: '复核',
 };
 const LEVEL: Record<EvidenceNode['type'], number> = {
   event: 0,
   alert: 1,
+  review: 1,
+  drift: 1,
   observation: 2,
-  ledger: 2,
-  construction: 2,
-  rectification: 2,
+  location: 2,
+  ledger: 3,
+  construction: 3,
+  rectification: 3,
 };
 
 // 确定性分层布局（不引入第三方图库）
@@ -68,21 +77,45 @@ export default function EvidencePage() {
       repository.raw(),
       repository.ledger(),
       repository.zones(),
+      repository.sectors(),
       repository.rectifications(),
       repository.alerts(),
       repository.events(),
-    ]).then(([raw, ledger, zones, rectifications, alerts, events]) => {
-      const graph = buildEvidenceGraph({
-        raw: raw as RawRecord[],
-        ledger: ledger as DeviceLedger[],
-        zones: zones as ConstructionZone[],
-        rectifications: rectifications as Rectification[],
-        alerts: alerts as Alert[],
-        events: events as CompressionEvent[],
-        membershipAlertIds: new Set((alerts as Alert[]).map((a) => a.id)),
-      });
-      setData({ ...graph, events: events as CompressionEvent[] });
-    });
+      repository.locationEvidence(),
+      repository.driftSegments(),
+      repository.locationAnomalies(),
+      repository.reviewItems(),
+    ]).then(
+      ([
+        raw,
+        ledger,
+        zones,
+        sectors,
+        rectifications,
+        alerts,
+        events,
+        locationEvidence,
+        driftSegments,
+        locationAnomalies,
+        reviewItems,
+      ]) => {
+        const graph = buildEvidenceGraph({
+          raw: raw as RawRecord[],
+          ledger: ledger as DeviceLedger[],
+          zones: zones as ConstructionZone[],
+          sectors: sectors as import('../../core/types').PatrolSector[],
+          rectifications: rectifications as Rectification[],
+          alerts: alerts as Alert[],
+          events: events as CompressionEvent[],
+          membershipAlertIds: new Set((alerts as Alert[]).map((a) => a.id)),
+          locationEvidence,
+          driftSegments,
+          locationAnomalies,
+          reviewItems,
+        });
+        setData({ ...graph, events: events as CompressionEvent[] });
+      },
+    );
   }, []);
 
   const graph = useMemo(() => {

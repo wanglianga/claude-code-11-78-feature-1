@@ -10,6 +10,7 @@ import {
   saveRawRecords,
   saveRectifications,
   saveRuleVersions,
+  saveSectors,
   saveZones,
 } from './db';
 import type { RawRecord } from './types';
@@ -48,6 +49,7 @@ export async function loadBundle(bundle: ScenarioBundle): Promise<LoaderStats> {
     saveRawRecords(signed),
     saveLedger(bundle.ledger),
     saveZones(bundle.zones),
+    saveSectors(bundle.sectors),
     saveRectifications(bundle.rectifications),
     saveRuleVersions(bundle.ruleVersions),
     saveManifest(bundle.manifest),

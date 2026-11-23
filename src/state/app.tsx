@@ -17,7 +17,12 @@ import type {
   Alert,
   CompressionEvent,
   DisposalAction,
+  DriftSegment,
+  LocationAnomaly,
+  LocationEvidence,
+  LocationTrust,
   MembershipRecord,
+  ReviewItem,
   SyncConflict,
   SyncReport,
   UserRole,
@@ -38,6 +43,11 @@ export interface AppSnapshot {
   conflicts: SyncConflict[];
   report: SyncReport | null;
   dictValues: string[];
+  locationEvidence: LocationEvidence[];
+  locationTrusts: LocationTrust[];
+  driftSegments: DriftSegment[];
+  locationAnomalies: LocationAnomaly[];
+  reviewItems: ReviewItem[];
   workerBusy: boolean;
   workerMessage: string;
   lastElapsedMs: number;
@@ -55,6 +65,11 @@ interface AppCtx extends AppSnapshot {
     comment: string,
   ) => Promise<void>;
   resolveConflict: (entityId: string, resolution: SyncConflict['resolution']) => Promise<void>;
+  resolveReview: (
+    reviewId: string,
+    resolution: Extract<ReviewItem['status'], 'resolved' | 'rejected'>,
+    comment: string,
+  ) => Promise<void>;
   resetWorkspace: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -72,6 +87,11 @@ const EMPTY: AppSnapshot = {
   conflicts: [],
   report: null,
   dictValues: [],
+  locationEvidence: [],
+  locationTrusts: [],
+  driftSegments: [],
+  locationAnomalies: [],
+  reviewItems: [],
   workerBusy: false,
   workerMessage: '待装载',
   lastElapsedMs: 0,
@@ -85,17 +105,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [snap, setSnap] = useState<AppSnapshot>(EMPTY);
 
   const refresh = useCallback(async () => {
-    const [rawCount, alerts, events, memberships, actions, conflicts, reports, dictRow] =
-      await Promise.all([
-        repository.raw(),
-        repository.alerts(),
-        repository.events(),
-        repository.memberships(),
-        repository.actions(),
-        repository.conflicts(),
-        repository.reports(),
-        repository.loadDict(),
-      ]);
+    const [
+      rawCount,
+      alerts,
+      events,
+      memberships,
+      actions,
+      conflicts,
+      reports,
+      dictRow,
+      locationEvidence,
+      locationTrusts,
+      driftSegments,
+      locationAnomalies,
+      reviewItems,
+    ] = await Promise.all([
+      repository.raw(),
+      repository.alerts(),
+      repository.events(),
+      repository.memberships(),
+      repository.actions(),
+      repository.conflicts(),
+      repository.reports(),
+      repository.loadDict(),
+      repository.locationEvidence(),
+      repository.locationTrust(),
+      repository.driftSegments(),
+      repository.locationAnomalies(),
+      repository.reviewItems(),
+    ]);
     setSnap((prev) => ({
       ...prev,
       loaded: rawCount.length > 0,
@@ -107,6 +145,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       conflicts,
       report: reports[0] ?? null,
       dictValues: dictRow?.value ?? [],
+      locationEvidence,
+      locationTrusts,
+      driftSegments,
+      locationAnomalies,
+      reviewItems,
     }));
   }, []);
 
@@ -140,14 +183,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     workerRef.current = worker;
     setSnap((p) => ({ ...p, workerBusy: true, error: null, workerMessage: 'Worker 启动…' }));
 
-    const [raw, ledger, zones, rectifications, ruleVersions, mappingRow] = await Promise.all([
-      repository.raw(),
-      repository.ledger(),
-      repository.zones(),
-      repository.rectifications(),
-      repository.ruleVersions(),
-      repository.loadMapping(),
-    ]);
+    const [raw, ledger, zones, sectors, rectifications, ruleVersions, mappingRow] =
+      await Promise.all([
+        repository.raw(),
+        repository.ledger(),
+        repository.zones(),
+        repository.sectors(),
+        repository.rectifications(),
+        repository.ruleVersions(),
+        repository.loadMapping(),
+      ]);
     if (!mappingRow) throw new Error('语义映射缺失，请先装载场景');
 
     return new Promise<void>((resolve) => {
@@ -168,6 +213,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             dict: out.dict,
             report: out.report,
             actions: out.seededActions,
+            locationEvidence: out.locationEvidence,
+            locationTrust: out.locationTrusts,
+            driftSegments: out.driftSegments,
+            locationAnomalies: out.locationAnomalies,
+            reviewItems: out.reviewItems,
           });
           await refresh();
           setSnap((p) => ({ ...p, workerMessage: '核验完成，产物已落 IndexedDB' }));
@@ -205,6 +255,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           raw,
           ledger,
           zones,
+          sectors,
           rectifications,
           mapping: mappingRow.value,
           ruleVersions,
@@ -264,6 +315,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [refresh],
   );
 
+  const resolveReview = useCallback(
+    async (
+      reviewId: string,
+      resolution: Extract<ReviewItem['status'], 'resolved' | 'rejected'>,
+      comment: string,
+    ) => {
+      const actor = user?.name ?? '未登录';
+      await repository.resolveReviewItem(reviewId, resolution, comment, actor, NOW_ISO);
+      await refresh();
+    },
+    [refresh, user],
+  );
+
   const resetWorkspace = useCallback(async () => {
     workerRef.current?.terminate();
     workerRef.current = null;
@@ -278,10 +342,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       runVerify,
       addDisposal,
       resolveConflict,
+      resolveReview,
       resetWorkspace,
       refresh,
     }),
-    [snap, loadScenario, runVerify, addDisposal, resolveConflict, resetWorkspace, refresh],
+    [snap, loadScenario, runVerify, addDisposal, resolveConflict, resolveReview, resetWorkspace, refresh],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

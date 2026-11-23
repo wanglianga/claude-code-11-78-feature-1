@@ -10,6 +10,7 @@ const DIMENSIONS: CheckResult['dimension'][] = [
   '离线补传',
   '双路线一致性',
   '证据完整性',
+  '定位可信度',
 ];
 
 export default function SelfCheckPage() {
@@ -21,18 +22,21 @@ export default function SelfCheckPage() {
   const run = async () => {
     setRunning(true);
     const t0 = performance.now();
-    const [raw, ledger, zones, rectifications, ruleVersions, mappingRow] = await Promise.all([
-      repository.raw(),
-      repository.ledger(),
-      repository.zones(),
-      repository.rectifications(),
-      repository.ruleVersions(),
-      repository.loadMapping(),
-    ]);
+    const [raw, ledger, zones, sectors, rectifications, ruleVersions, mappingRow] =
+      await Promise.all([
+        repository.raw(),
+        repository.ledger(),
+        repository.zones(),
+        repository.sectors(),
+        repository.rectifications(),
+        repository.ruleVersions(),
+        repository.loadMapping(),
+      ]);
     const out = await runPipeline({
       raw,
       ledger,
       zones,
+      sectors,
       rectifications,
       mapping: mappingRow!.value,
       ruleVersions,

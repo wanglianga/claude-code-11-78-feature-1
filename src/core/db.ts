@@ -8,9 +8,15 @@ import type {
   ConstructionZone,
   DeviceLedger,
   DisposalAction,
+  DriftSegment,
+  LocationAnomaly,
+  LocationEvidence,
+  LocationTrust,
   MembershipRecord,
+  PatrolSector,
   RawRecord,
   Rectification,
+  ReviewItem,
   RuleVersion,
   ScenarioManifest,
   SyncConflict,
@@ -18,12 +24,13 @@ import type {
 } from './types';
 
 const DB_NAME = 'gas-consistency-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export const STORES = {
   raw: 'raw_records',
   ledger: 'ledger',
   construction: 'construction',
+  sectors: 'patrol_sectors',
   rectification: 'rectifications',
   ruleVersions: 'rule_versions',
   manifest: 'manifests',
@@ -33,6 +40,11 @@ export const STORES = {
   actions: 'disposal_actions',
   conflicts: 'sync_conflicts',
   reports: 'sync_reports',
+  locationEvidence: 'location_evidence',
+  locationTrust: 'location_trust',
+  driftSegments: 'drift_segments',
+  locationAnomalies: 'location_anomalies',
+  reviewItems: 'review_items',
   meta: 'meta',
 } as const;
 
@@ -45,6 +57,8 @@ export function openDb(): Promise<IDBDatabase> {
     req.onupgradeneeded = () => {
       const db = req.result;
       const make = (name: string, keyPath: string, indexes: [string, string][]) => {
+        // v1 -> v2 升级时旧 store 已存在，仅补建新增 store
+        if (db.objectStoreNames.contains(name)) return;
         const store = db.createObjectStore(name, { keyPath });
         for (const [idx, field] of indexes) store.createIndex(idx, field);
       };
@@ -55,6 +69,7 @@ export function openDb(): Promise<IDBDatabase> {
       ]);
       make(STORES.ledger, 'deviceId', []);
       make(STORES.construction, 'id', []);
+      make(STORES.sectors, 'id', []);
       make(STORES.rectification, 'id', [['by_device', 'deviceId']]);
       make(STORES.ruleVersions, 'id', [['by_active', 'active']]);
       make(STORES.manifest, 'id', []);
@@ -80,6 +95,20 @@ export function openDb(): Promise<IDBDatabase> {
         ['by_entity', 'entityId'],
       ]);
       make(STORES.reports, 'id', []);
+      make(STORES.locationEvidence, 'id', [
+        ['by_kind', 'kind'],
+        ['by_sector', 'sectorId'],
+      ]);
+      make(STORES.locationTrust, 'evidenceId', []);
+      make(STORES.driftSegments, 'id', [['by_status', 'status']]);
+      make(STORES.locationAnomalies, 'id', [
+        ['by_kind', 'kind'],
+        ['by_verdict', 'verdict'],
+      ]);
+      make(STORES.reviewItems, 'id', [
+        ['by_status', 'status'],
+        ['by_category', 'category'],
+      ]);
       make(STORES.meta, 'key', []);
     };
     req.onsuccess = () => resolve(req.result);
@@ -153,6 +182,7 @@ export async function countStore(store: string): Promise<number> {
 export const saveRawRecords = (rows: RawRecord[]) => putMany(STORES.raw, rows);
 export const saveLedger = (rows: DeviceLedger[]) => putMany(STORES.ledger, rows);
 export const saveZones = (rows: ConstructionZone[]) => putMany(STORES.construction, rows);
+export const saveSectors = (rows: PatrolSector[]) => putMany(STORES.sectors, rows);
 export const saveRectifications = (rows: Rectification[]) =>
   putMany(STORES.rectification, rows);
 export const saveRuleVersions = (rows: RuleVersion[]) => putMany(STORES.ruleVersions, rows);
@@ -163,12 +193,20 @@ export const saveMemberships = (rows: MembershipRecord[]) =>
 export const saveActions = (rows: DisposalAction[]) => putMany(STORES.actions, rows);
 export const saveConflicts = (rows: SyncConflict[]) => putMany(STORES.conflicts, rows);
 export const saveReport = (r: SyncReport) => putOne(STORES.reports, r);
+export const saveLocationEvidence = (rows: LocationEvidence[]) =>
+  putMany(STORES.locationEvidence, rows);
+export const saveLocationTrust = (rows: LocationTrust[]) => putMany(STORES.locationTrust, rows);
+export const saveDriftSegments = (rows: DriftSegment[]) => putMany(STORES.driftSegments, rows);
+export const saveLocationAnomalies = (rows: LocationAnomaly[]) =>
+  putMany(STORES.locationAnomalies, rows);
+export const saveReviewItems = (rows: ReviewItem[]) => putMany(STORES.reviewItems, rows);
 
 export async function loadAll() {
   const [
     raw,
     ledger,
     zones,
+    sectors,
     rectifications,
     ruleVersions,
     manifests,
@@ -178,10 +216,16 @@ export async function loadAll() {
     actions,
     conflicts,
     reports,
+    locationEvidence,
+    locationTrust,
+    driftSegments,
+    locationAnomalies,
+    reviewItems,
   ] = await Promise.all([
     getAll<RawRecord>(STORES.raw),
     getAll<DeviceLedger>(STORES.ledger),
     getAll<ConstructionZone>(STORES.construction),
+    getAll<PatrolSector>(STORES.sectors),
     getAll<Rectification>(STORES.rectification),
     getAll<RuleVersion>(STORES.ruleVersions),
     getAll<ScenarioManifest>(STORES.manifest),
@@ -191,11 +235,17 @@ export async function loadAll() {
     getAll<DisposalAction>(STORES.actions),
     getAll<SyncConflict>(STORES.conflicts),
     getAll<SyncReport>(STORES.reports),
+    getAll<LocationEvidence>(STORES.locationEvidence),
+    getAll<LocationTrust>(STORES.locationTrust),
+    getAll<DriftSegment>(STORES.driftSegments),
+    getAll<LocationAnomaly>(STORES.locationAnomalies),
+    getAll<ReviewItem>(STORES.reviewItems),
   ]);
   return {
     raw,
     ledger,
     zones,
+    sectors,
     rectifications,
     ruleVersions,
     manifests,
@@ -205,14 +255,28 @@ export async function loadAll() {
     actions,
     conflicts,
     reports,
+    locationEvidence,
+    locationTrust,
+    driftSegments,
+    locationAnomalies,
+    reviewItems,
   };
 }
 
 export async function wipeDerivedData(): Promise<void> {
   await Promise.all(
-    [STORES.alerts, STORES.events, STORES.memberships, STORES.conflicts, STORES.reports].map(
-      clearStore,
-    ),
+    [
+      STORES.alerts,
+      STORES.events,
+      STORES.memberships,
+      STORES.conflicts,
+      STORES.reports,
+      STORES.locationEvidence,
+      STORES.locationTrust,
+      STORES.driftSegments,
+      STORES.locationAnomalies,
+      STORES.reviewItems,
+    ].map(clearStore),
   );
 }
 

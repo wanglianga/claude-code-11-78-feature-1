@@ -10,7 +10,13 @@ import type { Alert, RuleKind } from './types';
 
 export interface CheckResult {
   id: string;
-  dimension: '漂移与施工' | '规则换版' | '离线补传' | '双路线一致性' | '证据完整性';
+  dimension:
+    | '漂移与施工'
+    | '规则换版'
+    | '离线补传'
+    | '双路线一致性'
+    | '证据完整性'
+    | '定位可信度';
   name: string;
   passed: boolean;
   detail: string;
@@ -228,6 +234,85 @@ export async function runSelfCheck(
           `A=${out.report.routeStats.A.payloadBytes}B，B=${out.report.routeStats.B.payloadBytes}B`,
         )
       : bad('AB-5', '双路线一致性', '路线 B 本地存储小于路线 A', '体积对比异常'),
+  );
+
+  // ---------- 定位可信度 ----------
+  const corrected = out.driftSegments.filter((s) => s.status === 'corrected');
+  const uncorrectable = out.driftSegments.filter((s) => s.status === 'uncorrectable');
+  results.push(
+    out.driftSegments.length === 2 && corrected.length === 1 && uncorrectable.length === 1
+      ? ok('GEO-1', '定位可信度', '漂移切分得到可校正段与不可校正段各一', `共 ${out.driftSegments.length} 段：${corrected[0].id} 已校正、${uncorrectable[0].id} 不可校正`)
+      : bad('GEO-1', '定位可信度', '漂移切分得到可校正段与不可校正段各一', `实际段数=${out.driftSegments.length}，校正=${corrected.length}，不可校正=${uncorrectable.length}`),
+  );
+
+  const seg1 = corrected[0];
+  const basisOk = !!seg1 && ['C1', 'C2', 'C3', 'C4'].every((c) => seg1.correctionBasis.some((b) => b.startsWith(c)));
+  results.push(
+    basisOk
+      ? ok('GEO-2', '定位可信度', '区间校正满足 C1-C4 明确校验条件并保留依据', `${seg1!.id} 校正到片区 ${seg1!.correctedSectorId} 锚点，${seg1!.correctionBasis.length} 条依据可审计`)
+      : bad('GEO-2', '定位可信度', '区间校正满足 C1-C4 明确校验条件并保留依据', '校正条件依据不完整'),
+  );
+
+  const seg2 = uncorrectable[0];
+  const reasonOk = !!seg2 && !!seg2.uncorrectableReason?.includes('不能校正的时间范围') && seg2.contradictEvidenceIds.length >= 2;
+  results.push(
+    reasonOk
+      ? ok('GEO-3', '定位可信度', '不可校正范围保留时间范围、原因与跨片区矛盾证据', seg2!.uncorrectableReason!)
+      : bad('GEO-3', '定位可信度', '不可校正范围保留时间范围、原因与跨片区矛盾证据', '缺少不可校正范围说明或矛盾证据'),
+  );
+
+  const locById = new Map(out.locationEvidence.map((e) => [e.id, e]));
+  const rawKept =
+    !!seg1 &&
+    seg1.evidenceIds.every((id) => {
+      const e = locById.get(id);
+      return e && e.sectorId === null; // 原始漂移点仍在围栏外，未被校正落点替换
+    });
+  results.push(
+    rawKept
+      ? ok('GEO-4', '定位可信度', '校正后原始 GPS 坐标完整保留、不回写原始记录', `${seg1!.evidenceIds.length} 个漂移点原始坐标仍为数公里外的围栏外位置`)
+      : bad('GEO-4', '定位可信度', '校正后原始 GPS 坐标完整保留、不回写原始记录', '发现原始坐标被替换'),
+  );
+
+  const kindCount = (k: string) => out.locationAnomalies.filter((a) => a.kind === k).length;
+  const anomalyOk =
+    kindCount('independent_doubt') === 2 &&
+    kindCount('trip_anomaly') === 2 &&
+    kindCount('repair_link') === 1;
+  results.push(
+    anomalyOk
+      ? ok('GEO-5', '定位可信度', '独立疑点/行程异常/报修联动三类样例齐全', `独立疑点 2（照片在漂移段外）、行程异常 2（连续速度越上限）、报修联动 1（跨片区扫码+报修单）`)
+      : bad('GEO-5', '定位可信度', '独立疑点/行程异常/报修联动三类样例齐全', `实际计数 ${JSON.stringify(out.locationAnomalies.map((a) => a.kind))}`),
+  );
+
+  const geoAlerts = out.alerts.filter((a) => a.kind === 'geo_breach');
+  const down = geoAlerts.filter((a) => a.geoAdjustment?.downweighted);
+  const kept = geoAlerts.filter((a) => a.geoAdjustment && !a.geoAdjustment.downweighted);
+  const downweightOk =
+    geoAlerts.length === 5 &&
+    down.length === 3 &&
+    kept.length === 2 &&
+    down.every((a) => a.geoAdjustment!.originalSeverity === 'critical' && a.severity === 'minor') &&
+    kept.every((a) => a.severity === 'critical');
+  results.push(
+    downweightOk
+      ? ok('GEO-6', '定位可信度', '定位单独触发的越界告警按多源证据降权、原级留痕', `3 条可校正段告警 critical→minor；2 条不可校正段维持 critical，originalSeverity 全部保留`)
+      : bad('GEO-6', '定位可信度', '定位单独触发的越界告警按多源证据降权、原级留痕', `越界告警 ${geoAlerts.length} 条，降权 ${down.length} 条，维持 ${kept.length} 条`),
+  );
+
+  const reviewCats = new Set(out.reviewItems.map((r) => r.category));
+  const reviewTraceable = out.reviewItems.every((r) => r.evidenceRefs.length > 0);
+  results.push(
+    reviewCats.size === 3 && reviewTraceable
+      ? ok('GEO-7', '定位可信度', '复核队列覆盖告警/漂移段/异常且证据可回溯', `${out.reviewItems.length} 条复核单，类别 ${[...reviewCats].join('/')}，证据签名均非空`)
+      : bad('GEO-7', '定位可信度', '复核队列覆盖告警/漂移段/异常且证据可回溯', `类别数=${reviewCats.size}，可回溯=${reviewTraceable}`),
+  );
+
+  const geoInEvents = [...out.eventsA, ...out.eventsB].some((e) => e.ruleId === 'R-GEO');
+  results.push(
+    geoInEvents
+      ? ok('GEO-8', '定位可信度', '定位越界告警进入双路线压缩并参与 A/B 等价核验', 'R-GEO 事件同时存在于路线 A 成员关系与路线 B 见证')
+      : bad('GEO-8', '定位可信度', '定位越界告警进入双路线压缩并参与 A/B 等价核验', '未找到 R-GEO 聚合事件'),
   );
 
   return results;

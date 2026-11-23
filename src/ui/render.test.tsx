@@ -15,6 +15,7 @@ import LoaderPage from '../ui/pages/LoaderPage';
 import AlignmentPage from '../ui/pages/AlignmentPage';
 import RulesPage from '../ui/pages/RulesPage';
 import VerificationPage from '../ui/pages/VerificationPage';
+import LocationPage from '../ui/pages/LocationPage';
 import EventsPage from '../ui/pages/EventsPage';
 import EventDetailPage from '../ui/pages/EventDetailPage';
 import EvidencePage from '../ui/pages/EvidencePage';
@@ -51,6 +52,7 @@ describe('页面组件渲染冒烟', () => {
     ['对齐页', <AlignmentPage key="align" />],
     ['规则页', <RulesPage key="rules" />],
     ['核验页', <VerificationPage key="verify" />],
+    ['定位可信度页', <LocationPage key="location" />],
     ['事件列表页', <EventsPage key="events" />],
     ['事件调查页', <EventDetailPage key="detail" />],
     ['证据图页', <EvidencePage key="evidence" />],

@@ -241,3 +241,15 @@ ul.tight li { margin-bottom: 4px; }
 @media (max-width: 980px) { .route-compare { grid-template-columns: 1fr; } }
 .route-box { border: 1px solid var(--line); border-radius: 9px; padding: 14px; }
 .route-box h4 { margin: 0 0 8px; }
+
+/* 定位可信度复核 */
+.review-input {
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12.5px;
+  width: 100%;
+}
+.badge.drift-level { background: #fde7e3; color: var(--bad); }
+.badge.trust-level { background: #e5f4ec; color: var(--ok); }
+.badge.suspect-level { background: #fef3e2; color: var(--warn); }
