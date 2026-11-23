@@ -1,0 +1,8 @@
+services:
+  gas-consistency:
+    build: .
+    image: gas-observation-consistency:1.0.0
+    container_name: gas-consistency
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
